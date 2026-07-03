@@ -68,7 +68,7 @@ pip install requests
 
 - Аккаунт AbuseIPDB с API-ключом.
 - Аккаунт Cloudflare с API token и Zone ID для каждого домена.
-- Для AbuseIPDB рекомендуется передавать API key через HTTP-заголовок `Key`, а не в query string. [page:2]
+- Для AbuseIPDB рекомендуется передавать API key через HTTP-заголовок `Key`, а не в query string. 
 
 ---
 
@@ -314,11 +314,10 @@ PRIMARY KEY (ip, domain)
 
 ## AbuseIPDB API
 
-Скрипт использует endpoint’ы `check` и `report` API v2. [page:2][web:1]
-
+Скрипт использует endpoint’ы `check` и `report` API v2. 
 ### `GET /api/v2/check`
 
-Используется для проверки IP перед репортом и для поиска ваших прошлых репортов по `report_tag`. [page:2]
+Используется для проверки IP перед репортом и для поиска ваших прошлых репортов по `report_tag`. 
 
 Параметры:
 
@@ -326,9 +325,9 @@ PRIMARY KEY (ip, domain)
 - `maxAgeInDays`
 - `verbose`
 
-`verbose` нужен, если вы хотите получить массив `reports`; без него отчёты не возвращаются. [page:2]
+`verbose` нужен, если вы хотите получить массив `reports`; без него отчёты не возвращаются. 
 
-`maxAgeInDays` может быть от 1 до 365, а значение по умолчанию у AbuseIPDB — 30 дней. [page:2]
+`maxAgeInDays` может быть от 1 до 365, а значение по умолчанию у AbuseIPDB — 30 дней. 
 
 Скрипт делает запрос примерно в таком виде:
 
@@ -338,30 +337,30 @@ params = {"ipAddress": ip, "maxAgeInDays": max_age_days, "verbose": ""}
 
 ### `POST /api/v2/report`
 
-Используется для отправки нового репорта. [page:2]
+Используется для отправки нового репорта. 
 
 Параметры:
 
 - `ip`
 - `categories`
 - `comment`
-- `timestamp` [page:2]
+- `timestamp` 
 
-`comment` у AbuseIPDB ограничен 1024 символами, поэтому в коде есть `truncate_comment()`. [page:2]
+`comment` у AbuseIPDB ограничен 1024 символами, поэтому в коде есть `truncate_comment()`.
 
-`timestamp` принимает ISO 8601 datetime и может отражать реальное время наблюдения атаки, а не только текущее время отправки. [page:2]
+`timestamp` принимает ISO 8601 datetime и может отражать реальное время наблюдения атаки, а не только текущее время отправки. 
 
 Скрипт передаёт в `timestamp` значение `first_seen`.
 
 ### Почему используется свой `report_tag`
 
-AbuseIPDB возвращает массив прошлых отчётов для IP при `verbose`, и скрипт проверяет именно наличие **вашего** уникального тега в `comment`, а не просто факт существования любого старого репорта. [page:2]
+AbuseIPDB возвращает массив прошлых отчётов для IP при `verbose`, и скрипт проверяет именно наличие **вашего** уникального тега в `comment`, а не просто факт существования любого старого репорта. 
 
 Это важно, потому что чужие репорты не должны мешать отправить ваш собственный репорт.
 
 ### Rate limit
 
-При превышении лимита AbuseIPDB отвечает `429 Too Many Requests` и возвращает полезные заголовки `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` и `X-RateLimit-Reset`. [page:2]
+При превышении лимита AbuseIPDB отвечает `429 Too Many Requests` и возвращает полезные заголовки `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` и `X-RateLimit-Reset`. 
 
 В коде это используется так:
 
@@ -369,15 +368,15 @@ AbuseIPDB возвращает массив прошлых отчётов для
 - при `429` берётся `Retry-After`;
 - затем обновляется общий backoff через `set_abuse_backoff()`.
 
-Также AbuseIPDB отдельно указывает, что тестовый IP `127.0.0.2` можно использовать для симуляции краткосрочного rate limit на `report`. [page:2]
+Также AbuseIPDB отдельно указывает, что тестовый IP `127.0.0.2` можно использовать для симуляции краткосрочного rate limit на `report`. 
 
 ---
 
 ## Cloudflare
 
-Для бана используется Cloudflare Access Rules API по пути `POST /{accounts_or_zones}/{account_or_zone_id}/firewall/access_rules/rules`. [page:1]
+Для бана используется Cloudflare Access Rules API по пути `POST /{accounts_or_zones}/{account_or_zone_id}/firewall/access_rules/rules`. 
 
-Для одиночного IPv4-адреса `configuration.target` должен быть `ip`, а для IPv6 — `ip6`, что и делает текущий код. [page:1]
+Для одиночного IPv4-адреса `configuration.target` должен быть `ip`, а для IPv6 — `ip6`, что и делает текущий код. 
 
 В текущей реализации отправляется тело:
 
@@ -392,7 +391,7 @@ AbuseIPDB возвращает массив прошлых отчётов для
 }
 ```
 
-Cloudflare Access Rules поддерживает режимы вроде `block`, `challenge`, `whitelist`, `js_challenge` и `managed_challenge`, но ваш код использует именно `block`. [page:1]
+Cloudflare Access Rules поддерживает режимы вроде `block`, `challenge`, `whitelist`, `js_challenge` и `managed_challenge`, но ваш код использует именно `block`. 
 
 Если `cf_zone_id` не задан или `CF_API_TOKEN` не настроен, Cloudflare ban пропускается без падения процесса.
 
@@ -475,30 +474,6 @@ journalctl -u abuse-reporter -f
 - В коде нет отдельной дедупликации по `comment` вне механизма `report_tag`.
 - В `reported_ips` запись создаётся только если IP уже был репорчен вами ранее или если новый репорт успешно ушёл в AbuseIPDB; при неуспешном `report` IP не фиксируется как обработанный.
 - Cloudflare ban выполняется даже в ветке `already reported by me`.
-
----
-
-## Безопасность
-
-- Не храните реальные токены в публичном репозитории.
-- Ограничьте права на SQLite-базу и `state_file`.
-- Желательно перенести секреты в переменные окружения или systemd `EnvironmentFile`.
-- Выдавайте Cloudflare token с минимально необходимыми правами только на нужные зоны.
-- Не включайте в `comment` токены, cookie, session id, Authorization headers и прочие чувствительные данные.
-- AbuseIPDB рекомендует использовать HTTPS и передавать API key в заголовке, потому что query string может попасть в логи промежуточных систем. [page:2]
-
----
-
-## Что было исправлено относительно старого README
-
-- Убран несуществующий параметр `API_SLEEP_SECONDS_ON_429`.
-- Добавлены реальные параметры: `ABUSE_REQUEST_TIMEOUT`, `ABUSE_COMMENT_MAX_LEN`, `ABUSE_MIN_REQUEST_INTERVAL_SECONDS`, `ABUSE_CHECK_MIN_REQUEST_INTERVAL_SECONDS`, `ABUSE_REPORT_MIN_REQUEST_INTERVAL_SECONDS`, `PROCESS_WORKERS`, `SQLITE_TIMEOUT`.
-- Исправлено описание `already_reported_by_me()`: функция принимает `abuse_data`, а не IP.
-- Исправлено описание новой архитектуры: логика вынесена в `process_ip()`, а не в старый inline-цикл внутри `process_site()`.
-- Добавлено описание `ip_cache`, reverse DNS cache и AbuseIPDB cache.
-- Исправлено описание rate limiting: теперь это не sleep-константа, а per-endpoint интервалы + backoff.
-- Уточнён Cloudflare endpoint и типы `configuration.target` для IPv4/IPv6. [page:1]
-- Уточнено, что для получения массива прошлых репортов у AbuseIPDB нужен `verbose`. [page:2]
 
 ---
 
