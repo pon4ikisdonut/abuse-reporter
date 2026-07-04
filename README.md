@@ -111,6 +111,10 @@ WHITE_LIST_ASNS=
 WHITE_LIST_HOSTNAME_PATTERNS=\.googlebot\.com$,\.google\.com$,\.search\.msn\.com$,\.bing\.com$,\.yandex\.ru$,\.yandex\.net$,\.crawl\.baidu\.com$
 ```
 
+# IMPORTANT:
+# SITES_JSON must be on a single line because the current .env loader does not support multiline values.
+
+
 ### 3. What is stored in `.env`
 
 #### API and Cloudflare
