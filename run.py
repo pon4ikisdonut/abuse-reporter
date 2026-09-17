@@ -1,6 +1,6 @@
 import json
 import os
-import runpy
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 
@@ -29,9 +29,12 @@ def load_env(path: Path) -> None:
             while True:
                 try:
                     parsed = json.loads(candidate)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as exc:
                     if i >= len(lines):
-                        raise ValueError("Invalid multiline SITES_JSON in .env")
+                        raise ValueError(
+                            f"Invalid multiline SITES_JSON in .env: {exc.msg} "
+                            f"(line {exc.lineno}, column {exc.colno})"
+                        ) from exc
                     candidate += lines[i].strip()
                     i += 1
                     continue
@@ -41,7 +44,7 @@ def load_env(path: Path) -> None:
                 break
             continue
 
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
             value = value[1:-1]
         os.environ.setdefault(key, value)
 
@@ -50,8 +53,6 @@ def load_env(path: Path) -> None:
 
 def prepare_environment() -> None:
     load_env(ENV_FILE)
-
-    # Portable default: works on Linux, macOS and Windows.
     os.environ.setdefault("DB_FILE", str(ENV_FILE.parent / "data" / "abuse_reporter.db"))
 
     raw_sites = os.getenv("SITES_JSON")
@@ -67,8 +68,6 @@ def prepare_environment() -> None:
             if value and not os.path.isabs(value):
                 site[field] = str((ENV_FILE.parent / value).resolve())
 
-    # The legacy module expects one JSON value in the environment. Keep the
-    # human-facing .env readable while handing it compact JSON internally.
     os.environ["SITES_JSON"] = json.dumps(sites, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -95,8 +94,6 @@ def main() -> None:
             print(f"[~] {ip} whitelisted ({local_reason}), skipping.")
             return
 
-        # maxAgeInDays is passed directly to AbuseIPDB. With verbose enabled,
-        # the API returns only reports inside that window.
         abuse_meta = app.abuseipdb_check_ip(
             ip,
             max_age_days=app.ABUSE_CHECK_MAX_AGE_DAYS,
@@ -104,8 +101,6 @@ def main() -> None:
             use_cache=True,
         )
         if abuse_meta is None:
-            # Fail closed: never create a duplicate report when the check
-            # could not be completed.
             print(f"[!] {ip}: AbuseIPDB check failed; refusing to submit a new report.")
             return
 
@@ -114,7 +109,6 @@ def main() -> None:
             print(f"[~] {ip} whitelisted ({abuse_reason}), skipping.")
             return
 
-        existing_row = app.get_reported_ip_row(ip, domain)
         has_report, reported_at = already_reported_anywhere(abuse_meta)
         if has_report:
             print(
@@ -141,9 +135,6 @@ def main() -> None:
             )
             return
 
-        # The local DB is state/history, not the source of truth for duplicate
-        # reports. AbuseIPDB itself is the source of truth for the configured
-        # report-age window.
         abuse_success, comment, report_meta = app.report_to_abuseipdb(
             ip, domain, data, report_tag
         )
@@ -181,8 +172,6 @@ def main() -> None:
 
     app.process_ip = process_ip
 
-    # Make bare/relative DB paths safe on Windows too. The original module
-    # assumes DB_FILE always contains a directory component.
     original_init_db = app.init_db
 
     def init_db_safe():
@@ -191,6 +180,47 @@ def main() -> None:
 
     app.init_db = init_db_safe
 
+    def fast_main_loop():
+        if not app.validate_sites_config():
+            return
+
+        app.init_db()
+        workers = max(1, int(app.PROCESS_WORKERS))
+        print(
+            f"[~] Starting in 24/7 mode, check interval: {app.CHECK_INTERVAL_SECONDS} sec. "
+            f"Sites: {len(app.SITES)}, shared workers: {workers}, "
+            f"report_mode: serialized, cf_ban_mode: {app.CF_BAN_MODE}"
+        )
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="abuse-worker") as executor:
+            while True:
+                app.cleanup_expired_cloudflare_bans()
+                futures = []
+
+                # Parse all sites first, then process every IP through ONE shared
+                # pool. This avoids the old per-site worker pools and keeps all
+                # sites busy concurrently.
+                for site in app.SITES:
+                    try:
+                        bad_ips = app.parse_logs(site)
+                        for ip, data in bad_ips.items():
+                            futures.append(executor.submit(app.process_ip, site, ip, data))
+                    except Exception as exc:
+                        print(f"[!] Unhandled error while parsing {site['domain']}: {exc}")
+
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except app.AbuseIPDBRateLimitError as exc:
+                        print(f"[!] Rate limit AbuseIPDB: {exc}")
+                    except Exception as exc:
+                        print(f"[!] Error in worker: {exc}")
+
+                time_to_sleep = max(0, app.CHECK_INTERVAL_SECONDS)
+                import time
+                time.sleep(time_to_sleep)
+
+    app.main_loop = fast_main_loop
     app.main_loop()
 
 
