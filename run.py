@@ -1,7 +1,6 @@
 import json
 import os
 import socket
-import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -77,18 +76,31 @@ def prepare_environment() -> None:
 def main() -> None:
     prepare_environment()
 
-    # Reverse DNS is the one operation that can block outside requests/HTTP
-    # timeouts. Put a hard ceiling on it so a single bad DNS resolver cannot
-    # pin a worker forever.
+    # Reverse DNS can block independently of HTTP request timeouts.
     dns_timeout = float(os.getenv("DNS_TIMEOUT_SECONDS", "3"))
     socket.setdefaulttimeout(max(0.5, dns_timeout))
 
     import abuse_reporter as app
 
-    # SQLite is shared by many workers. The original connection helper enables
-    # WAL on every connection, which can itself wait on another writer. Keep
-    # WAL configured by init_db, and use a short explicit busy timeout for
-    # worker connections instead of allowing apparent hangs.
+    # The previous wrapper introduced artificial 2s/check and 15s/report
+    # delays. AbuseIPDB documents daily API limits and a 15-minute duplicate
+    # restriction for the SAME IP, not a global 15s delay for every report.
+    # Keep the limiter as a safety mechanism, but make it short enough that
+    # worker concurrency is actually useful. The server still enforces its
+    # own limits and 429 responses are handled by abuse_reporter.py.
+    original_acquire_abuse_slot = app.acquire_abuse_slot
+    fast_min_interval = max(0.0, float(os.getenv("ABUSE_WORKER_MIN_INTERVAL_SECONDS", "0.10")))
+
+    def acquire_abuse_slot_fast(slot_name="default", min_interval=0.0):
+        return original_acquire_abuse_slot(
+            slot_name=slot_name,
+            min_interval=min(fast_min_interval, max(0.0, float(min_interval))),
+        )
+
+    app.acquire_abuse_slot = acquire_abuse_slot_fast
+
+    # SQLite is shared by many workers. Add an explicit busy timeout on every
+    # worker connection so short write contention does not look like a hang.
     original_get_db_conn = app.get_db_conn
 
     def get_db_conn_safe():
@@ -117,6 +129,7 @@ def main() -> None:
             print(f"[~] {ip} whitelisted ({local_reason}), skipping.", flush=True)
             return
 
+        print(f"[~][{domain}] {ip}: checking AbuseIPDB ({app.ABUSE_CHECK_MAX_AGE_DAYS}d)...", flush=True)
         abuse_meta = app.abuseipdb_check_ip(
             ip,
             max_age_days=app.ABUSE_CHECK_MAX_AGE_DAYS,
@@ -143,6 +156,7 @@ def main() -> None:
             app.save_ip_to_db(ip, domain, data["first_seen"], data["last_seen"], cf_banned=cf_status, abuse_meta=abuse_meta, last_comment=f"SKIPPED: AbuseIPDB already has a report in the configured window ({reported_at})", cf_rule_id=cf_rule_id, cf_ban_mode=cf_ban_mode, cf_ban_expires_at=cf_ban_expires_at)
             return
 
+        print(f"[~][{domain}] {ip}: no AbuseIPDB report found; submitting...", flush=True)
         abuse_success, comment, report_meta = app.report_to_abuseipdb(ip, domain, data, report_tag)
         cf_status, cf_rule_id, cf_ban_mode, cf_ban_expires_at = app.ban_in_cloudflare(ip, site["cf_zone_id"])
 
@@ -171,7 +185,8 @@ def main() -> None:
         print(
             f"[~] Starting in 24/7 mode, check interval: {app.CHECK_INTERVAL_SECONDS} sec. "
             f"Sites: {len(app.SITES)}, shared workers: {workers}, "
-            f"report_mode: serialized, cf_ban_mode: {app.CF_BAN_MODE}",
+            f"AbuseIPDB worker interval: {fast_min_interval:.2f}s, "
+            f"cf_ban_mode: {app.CF_BAN_MODE}",
             flush=True,
         )
 
@@ -192,6 +207,7 @@ def main() -> None:
                 if futures:
                     print(f"[~] Submitted {len(futures)} IP jobs to {workers} workers.", flush=True)
 
+                completed = 0
                 for future in as_completed(futures):
                     try:
                         future.result()
@@ -199,6 +215,9 @@ def main() -> None:
                         print(f"[!] Rate limit AbuseIPDB: {exc}", flush=True)
                     except Exception as exc:
                         print(f"[!] Error in worker: {exc}", flush=True)
+                    completed += 1
+                    if completed % max(1, workers) == 0 or completed == len(futures):
+                        print(f"[~] Progress: {completed}/{len(futures)} IP jobs finished.", flush=True)
 
                 elapsed = time.monotonic() - cycle_started
                 sleep_for = max(0, app.CHECK_INTERVAL_SECONDS - elapsed)
